@@ -1,0 +1,165 @@
+name: Daily Fork & Sidebar Update
+
+# ============================================
+# 所有可配置参数都在这里
+# ============================================
+env:
+  # ---------- 任务1：Fork 地址更新 ----------
+  UPSTREAM_REPO: "DuckBurnIncense/xin-wen-lian-bo"                # 上游仓库，格式 owner/repo
+  UPSTREAM_BRANCH: "master"              # 上游分支名（main 或 master）
+  SYNC_STRATEGY: "reset"               # 同步策略：reset（强制同步）、merge、rebase
+
+  # ---------- 任务2：Docsify 侧边栏生成 ----------
+  SIDEBAR_ROOT_DIR: "."                      # 扫描根目录
+  SIDEBAR_OUTPUT: "news/README.md"              # 输出的侧边栏文件
+  SIDEBAR_MD_TITLE: "目录"                   # 侧边栏顶部标题（可选）
+
+  # ---------- 侧边栏配置（JSON，替代原 YAML 文件） ----------
+  # 说明：支持以下字段（均为可选）
+  #   exclude_dirs:   排除的文件夹列表
+  #   exclude_files:  排除的文件列表
+  #   include_dirs:   强制包含的文件夹列表
+  #   include_files:  强制包含的文件列表
+  #   custom_sidebar: 完全自定义的侧边栏结构（如果存在，将忽略自动扫描）
+  #
+  # 示例1：自动扫描并排除某些内容
+  #   SIDEBAR_CONFIG_JSON: '{"exclude_dirs": ["node_modules",".git"], "exclude_files": ["README.md"]}'
+  #
+  # 示例2：完全自定义
+  #   SIDEBAR_CONFIG_JSON: '{"custom_sidebar": ["## 入门", {"title": "快速开始", "path": "guide/quickstart.md"}]}'
+  SIDEBAR_CONFIG_JSON: '{"exclude_dirs": ["node_modules", ".git", "private"], "exclude_files": ["README.md", "CHANGELOG.md"]}'
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 每天 UTC 0 点，可按需修改
+  workflow_dispatch:
+    inputs:
+      upstream_repo:
+        description: '上游仓库 (owner/repo)'
+        required: false
+        default: ''
+      fork_target_file:
+        description: 'Fork 地址存放文件'
+        required: false
+        default: ''
+      sidebar_root_dir:
+        description: '侧边栏扫描根目录'
+        required: false
+        default: ''
+      sidebar_output:
+        description: '侧边栏输出文件'
+        required: false
+        default: ''
+      sidebar_config_json:
+        description: '侧边栏配置 JSON（覆盖 env 中的配置）'
+        required: false
+        default: ''
+
+jobs:
+  daily-update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout 仓库
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 打印所有参数
+        run: |
+          echo "======== 当前参数配置 ========"
+          echo "UPSTREAM_REPO: $UPSTREAM_REPO"
+          echo "FORK_TARGET_FILE: $FORK_TARGET_FILE"
+          echo "FORK_DATE_FORMAT: $FORK_DATE_FORMAT"
+          echo "SIDEBAR_ROOT_DIR: $SIDEBAR_ROOT_DIR"
+          echo "SIDEBAR_OUTPUT: $SIDEBAR_OUTPUT"
+          echo "SIDEBAR_MD_TITLE: $SIDEBAR_MD_TITLE"
+          echo "SIDEBAR_CONFIG_JSON: $SIDEBAR_CONFIG_JSON"
+          echo "手动触发覆盖值（如有）："
+          echo "input upstream_repo: ${{ github.event.inputs.upstream_repo || '未设置' }}"
+          echo "input fork_target_file: ${{ github.event.inputs.fork_target_file || '未设置' }}"
+          echo "input sidebar_root_dir: ${{ github.event.inputs.sidebar_root_dir || '未设置' }}"
+          echo "input sidebar_output: ${{ github.event.inputs.sidebar_output || '未设置' }}"
+          echo "input sidebar_config_json: ${{ github.event.inputs.sidebar_config_json || '未设置' }}"
+          echo "================================"
+   #   ========== 任务 1：从上游同步最新代码 ==========
+      - name: 同步 Fork 与上游仓库
+        env:
+          UPSTREAM: ${{ github.event.inputs.upstream_repo || env.UPSTREAM_REPO }}
+          BRANCH: ${{ github.event.inputs.upstream_branch || env.UPSTREAM_BRANCH }}
+          STRATEGY: ${{ github.event.inputs.sync_strategy || env.SYNC_STRATEGY }}
+        run: |
+          echo "::group::添加上游仓库 remote"
+          if git remote | grep -q upstream; then
+            git remote remove upstream
+          fi
+          git remote add upstream "https://github.com/${UPSTREAM}.git"
+          echo "::endgroup::"
+
+          echo "::group::拉取上游更新"
+          git fetch upstream "${BRANCH}"
+          echo "::endgroup::"
+
+           echo "::group::执行同步策略：${STRATEGY}"
+          case "${STRATEGY}" in reset)
+            # 1. 备份本地 .github 目录（如果存在）
+              if [ -d .github ]; then
+                echo "备份 .github 目录"
+                cp -r .github /tmp/github-backup
+              fi
+
+              # 2. 强制重置到上游
+              git reset --hard "upstream/${BRANCH}"
+
+              # 3. 恢复备份的 .github 目录，覆盖可能存在的上游 .github
+              if [ -d /tmp/github-backup ]; then
+                echo "恢复 .github 目录"
+                rm -rf .github
+                cp -r /tmp/github-backup .github
+                git add .github
+                # 如果有变更，则在后面统一提交
+              fi
+              ;;
+            rebase)
+              git rebase "upstream/${BRANCH}" --strategy-option=theirs || {
+                echo "::error::Rebase 冲突未能自动解决"
+                exit 1
+              }
+              ;;
+            merge|*)
+              git merge "upstream/${BRANCH}" --no-edit -X theirs || {
+                echo "::error::Merge 冲突未能自动解决"
+                exit 1
+              }
+              ;;
+          esac
+          echo "::endgroup::"
+
+      # ---------- 任务2：生成 Docsify 侧边栏 ----------
+      - name: 生成侧边栏
+        env:
+          ROOT: ${{ github.event.inputs.sidebar_root_dir || env.SIDEBAR_ROOT_DIR }}
+          OUTPUT: ${{ github.event.inputs.sidebar_output || env.SIDEBAR_OUTPUT }}
+          TITLE: ${{ env.SIDEBAR_MD_TITLE }}
+          CONFIG_JSON: ${{ github.event.inputs.sidebar_config_json || env.SIDEBAR_CONFIG_JSON }}
+        run: |
+          python3 .github/scripts/generate_sidebar.py \
+            --root "$ROOT" \
+            --output "$OUTPUT" \
+            --title "$TITLE" \
+            --config-json "$CONFIG_JSON"
+
+      # ---------- 提交变更 ----------
+      - name: 提交并推送
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "没有变更，跳过提交"
+          else
+            git commit -m "🤖 自动更新：Fork 列表 & 侧边栏 $(date +'%Y-%m-%d')"
+            git push --force
+          fi
